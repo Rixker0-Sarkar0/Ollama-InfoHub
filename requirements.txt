@@ -1,0 +1,9 @@
+beautifulsoup4
+requests
+faiss-cpu
+sentence-transformers
+googlesearch-python
+ollama
+tqdm
+numpy
+logging
