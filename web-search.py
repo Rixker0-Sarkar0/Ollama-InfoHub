@@ -1,11 +1,8 @@
-import requests
-from bs4 import BeautifulSoup
-import urllib.parse
 import logging
-import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from googlesearch import search  # Requires: pip install googlesearch-python
+import ollama  # Requires: pip install ollama
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,74 +10,46 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Load embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# FAISS index setup
-embedding_dim = 384  # Dimension of MiniLM embeddings
-index = faiss.IndexFlatL2(embedding_dim)
-text_data = []
+# In-memory RAG storage
+rag_store = {}
 
-def scrape_text_from_url(url):
-    """Scrape and clean text from a given URL"""
-    try:
-        logging.info(f"Scraping: {url}")
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            tag.decompose()
-
-        return soup.get_text(separator='\n', strip=True)
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error scraping {url}: {e}")
-        return None
-
-def index_text(text):
-    """Convert text to vector embeddings and store in FAISS"""
-    global index, text_data
-    if not text:
-        return
-    
-    text_chunks = [text[i:i+500] for i in range(0, len(text), 500)]
-    embeddings = embedding_model.encode(text_chunks, convert_to_numpy=True)
-    
-    index.add(embeddings)
-    text_data.extend(text_chunks)
-    logging.info(f"Indexed {len(text_chunks)} chunks")
+def index_text(query, context):
+    """Store the context in memory for RAG retrieval"""
+    if context:
+        embedding = embedding_model.encode([query], convert_to_numpy=True)[0]
+        rag_store[query] = (embedding, context)
 
 def search_and_index_google(query, num_results=5):
-    """Perform a Google search and index the text from top results"""
-    logging.info(f"Searching Google for: {query}")
-    
+    """Perform a Google search and store the context in RAG"""
     search_results = search(query, num_results=num_results)
-    
-    for url in search_results:
-        logging.info(f"Processing: {url}")
-        text = scrape_text_from_url(url)
-        if text:
-            index_text(text)
+    context = "\n".join(search_results) if search_results else None
+    index_text(query, context)
 
 def retrieve_answer(query):
-    """Retrieve the most relevant answer from the FAISS index"""
-    if not text_data:
-        print("No indexed data available.")
-        return
-    
-    query_embedding = embedding_model.encode([query], convert_to_numpy=True)
-    distances, idxs = index.search(query_embedding, 1)  # Retrieve only the top result
-    
-    best_match = text_data[idxs[0][0]] if idxs[0][0] < len(text_data) else "No relevant answer found."
-    print("Answer:", best_match)
+    """Retrieve the most relevant context from the in-memory RAG and use LLM to generate an answer"""
+    if not rag_store:
+        return "No relevant data available."
+    query_embedding = embedding_model.encode([query], convert_to_numpy=True)[0]
+    best_match, best_score = None, float("inf")
+    for stored_query, (embedding, context) in rag_store.items():
+        score = np.linalg.norm(query_embedding - embedding)
+        if score < best_score:
+            best_score, best_match = score, context
+    if best_match:
+        response = ollama.generate(model="gemma3:1b", prompt=f"Based on the following context, answer the question: {query}\n\nContext:\n{best_match}")
+        return response.get("response")
+    return "No relevant answer found."
 
 def main():
     search_query = input("Enter your search query: ")
     search_and_index_google(search_query)
-
     while True:
         query = input("Ask a question (or type 'exit' to quit): ")
         if query.lower() == "exit":
             break
-        else:
-            retrieve_answer(query)
+        answer = retrieve_answer(query)
+        if answer:
+            print(answer)
 
 if __name__ == "__main__":
     main()
