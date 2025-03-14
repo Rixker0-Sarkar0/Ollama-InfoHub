@@ -12,18 +12,14 @@ def is_valid_fqdn(url):
     return bool(parsed_url.netloc) and bool(parsed_url.scheme)
 
 def direct_fqdn_fetch(url):
-    """
-    Directly hits the provided FQDN URL instead of performing a web search.
-    """
+    """Directly hits the provided FQDN URL instead of performing a web search."""
     if not is_valid_fqdn(url):
         print("Invalid FQDN URL provided.")
         return None
     return [url]
 
 def scrape_text_from_url(url):
-    """
-    Scrapes text content from a given URL, extracting only relevant documentation text.
-    """
+    """Scrapes text content from a given URL, extracting only relevant documentation text."""
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -39,9 +35,7 @@ def scrape_text_from_url(url):
         return None
 
 def brute_force_crawl(domain, start_url, max_pages=20):
-    """
-    Uses brute force breadth-first crawling to fetch all internal documentation links.
-    """
+    """Uses breadth-first crawling to fetch internal documentation links."""
     visited = set()
     queue = deque([start_url])
     links = set()
@@ -84,20 +78,22 @@ def chunk_text(text, chunk_size=80000):
         start_index = end_index
     return chunks
 
-def summarize_chunk_with_llama(chunk, model_name="llama3:2b"):
-    """Summarizes a text chunk using the Llama model via Ollama CLI."""
+def summarize_chunk_with_llama(chunk, model_name="llama3:8b"):
+    """Summarizes a text chunk using the Llama model running in the local Ollama environment."""
     try:
+        os.environ["PYTHONIOENCODING"] = "utf-8"
         process = subprocess.Popen(
-            ["ollama", "run", model_name, textwrap.dedent(f"""Summarize the following software documentation:
-            {chunk}
-            Summary:""")],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            ["ollama", "run", model_name],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8"
         )
-        stdout, stderr = process.communicate(timeout=60)
+        stdout, stderr = process.communicate(input=f"Summarize the following software documentation:\n{chunk}\nSummary:")
         if process.returncode != 0 or "Error:" in stdout:
+            print(f"Error summarizing chunk: {stderr}")
             return None
         return stdout.strip()
-    except Exception:
+    except Exception as e:
+        print(f"Summarization error: {e}")
         return None
 
 def main():
@@ -114,14 +110,27 @@ def main():
         internal_links = brute_force_crawl(domain, base_url)
         internal_links.insert(0, base_url)  # Include the main page
         
+        print(f"Internal links found: {len(internal_links)}")
+        
         for url in internal_links:
             scraped_text = scrape_text_from_url(url)
-            if scraped_text:
-                text_chunks = chunk_text(scraped_text)
-                chunk_summaries = [summarize_chunk_with_llama(chunk) for chunk in text_chunks if chunk]
-                combined_summary = "\n\n".join(filter(None, chunk_summaries))
-                if combined_summary:
-                    all_summaries.append(f"Summary from {url}:\n{combined_summary}")
+            if not scraped_text:
+                print(f"Failed to scrape content from {url}")
+                continue
+            
+            print(f"Scraped text length from {url}: {len(scraped_text)} characters")
+            text_chunks = chunk_text(scraped_text)
+            print(f"Generated {len(text_chunks)} chunks from {url}")
+            
+            chunk_summaries = [summarize_chunk_with_llama(chunk) for chunk in text_chunks if chunk]
+            chunk_summaries = list(filter(None, chunk_summaries))
+            
+            if not chunk_summaries:
+                print(f"No summaries generated for {url}")
+                continue
+            
+            combined_summary = "\n\n".join(chunk_summaries)
+            all_summaries.append(f"Summary from {url}:\n{combined_summary}")
     
     if all_summaries:
         final_summary = "\n\n---\n\n".join(all_summaries)
